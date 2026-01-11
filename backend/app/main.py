@@ -1,10 +1,12 @@
 import os
 import logging
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from app.api.routes import router
 from app.logging_config import setup_logging, RequestLoggingMiddleware, get_logger
-from app.metrics import get_metrics, get_metrics_content_type
+from app.metrics import get_metrics, get_metrics_content_type, app_errors_total
 import uvicorn
 
 # Configure structured logging for GCP Cloud Logging
@@ -41,6 +43,43 @@ app.add_middleware(
 app.add_middleware(RequestLoggingMiddleware, logger=logger)
 
 app.include_router(router)
+
+# Initialize Prometheus FastAPI Instrumentator
+# Adds HTTP request metrics (count, latency, status) to the default prometheus registry
+# Our /metrics endpoint will automatically include these via get_metrics()
+Instrumentator(
+    should_group_status_codes=False,
+    should_ignore_untemplated=True,
+    excluded_handlers=["/metrics", "/health"],
+).instrument(app)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Global exception handler that tracks errors in Prometheus metrics.
+    """
+    app_errors_total.labels(
+        endpoint=request.url.path,
+        error_type=type(exc).__name__
+    ).inc()
+
+    logger.error(
+        f"Unhandled exception: {exc}",
+        extra={
+            "extra_fields": {
+                "endpoint": request.url.path,
+                "error_type": type(exc).__name__,
+                "method": request.method,
+            }
+        },
+        exc_info=True,
+    )
+
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"}
+    )
 
 
 @app.on_event("startup")

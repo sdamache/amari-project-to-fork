@@ -3,6 +3,11 @@ Prometheus metrics for application monitoring.
 
 This module provides custom metrics that are exposed via a /metrics endpoint
 for Cloud Run to scrape and send to GCP Cloud Monitoring.
+
+Metrics include:
+- HTTP request metrics (via prometheus-fastapi-instrumentator)
+- Application-specific counters and histograms
+- LLM-specific error tracking
 """
 
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -28,6 +33,21 @@ llm_extraction_duration_seconds = Histogram(
 file_upload_bytes = Counter(
     "file_upload_bytes",
     "Total bytes uploaded",
+)
+
+# LLM-specific error counters
+# Track errors by provider and error type for better debugging
+llm_errors_total = Counter(
+    "llm_errors_total",
+    "LLM API errors by provider and type",
+    ["provider", "error_type"],  # e.g., provider=anthropic, error_type=rate_limit
+)
+
+# Application error counter with endpoint and error type
+app_errors_total = Counter(
+    "app_errors_total",
+    "Application errors by endpoint and type",
+    ["endpoint", "error_type"],
 )
 
 
