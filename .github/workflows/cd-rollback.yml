@@ -1,0 +1,136 @@
+name: CD - Rollback Cloud Run Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to rollback'
+        required: true
+        type: choice
+        options:
+          - backend
+          - frontend
+          - both
+      revision:
+        description: 'Revision to rollback to (leave empty for previous revision)'
+        required: false
+        type: string
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION }}
+
+jobs:
+  rollback:
+    name: Rollback Service
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Get available revisions
+        id: revisions
+        run: |
+          echo "## Available Revisions" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ inputs.service }}" == "backend" || "${{ inputs.service }}" == "both" ]]; then
+            echo "### Backend Revisions:" >> $GITHUB_STEP_SUMMARY
+            gcloud run revisions list --service=backend --region=${{ env.REGION }} --project=${{ env.PROJECT_ID }} --format="table(name,active,created)" 2>/dev/null | head -10 >> $GITHUB_STEP_SUMMARY || echo "No backend revisions found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ "${{ inputs.service }}" == "frontend" || "${{ inputs.service }}" == "both" ]]; then
+            echo "### Frontend Revisions:" >> $GITHUB_STEP_SUMMARY
+            gcloud run revisions list --service=frontend --region=${{ env.REGION }} --project=${{ env.PROJECT_ID }} --format="table(name,active,created)" 2>/dev/null | head -10 >> $GITHUB_STEP_SUMMARY || echo "No frontend revisions found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Rollback backend
+        if: inputs.service == 'backend' || inputs.service == 'both'
+        run: |
+          if [[ -n "${{ inputs.revision }}" ]]; then
+            # Rollback to specific revision
+            echo "Rolling back backend to revision: ${{ inputs.revision }}"
+            gcloud run services update-traffic backend \
+              --region=${{ env.REGION }} \
+              --project=${{ env.PROJECT_ID }} \
+              --to-revisions=${{ inputs.revision }}=100
+          else
+            # Get previous revision and rollback
+            echo "Rolling back backend to previous revision..."
+            REVISIONS=$(gcloud run revisions list --service=backend \
+              --region=${{ env.REGION }} \
+              --project=${{ env.PROJECT_ID }} \
+              --format="value(name)" \
+              --sort-by="~creationTimestamp" \
+              --limit=2)
+
+            PREVIOUS=$(echo "$REVISIONS" | tail -1)
+            if [[ -n "$PREVIOUS" ]]; then
+              echo "Rolling back to: $PREVIOUS"
+              gcloud run services update-traffic backend \
+                --region=${{ env.REGION }} \
+                --project=${{ env.PROJECT_ID }} \
+                --to-revisions=${PREVIOUS}=100
+            else
+              echo "No previous revision found"
+              exit 1
+            fi
+          fi
+
+      - name: Rollback frontend
+        if: inputs.service == 'frontend' || inputs.service == 'both'
+        run: |
+          if [[ -n "${{ inputs.revision }}" ]]; then
+            # Rollback to specific revision
+            echo "Rolling back frontend to revision: ${{ inputs.revision }}"
+            gcloud run services update-traffic frontend \
+              --region=${{ env.REGION }} \
+              --project=${{ env.PROJECT_ID }} \
+              --to-revisions=${{ inputs.revision }}=100
+          else
+            # Get previous revision and rollback
+            echo "Rolling back frontend to previous revision..."
+            REVISIONS=$(gcloud run revisions list --service=frontend \
+              --region=${{ env.REGION }} \
+              --project=${{ env.PROJECT_ID }} \
+              --format="value(name)" \
+              --sort-by="~creationTimestamp" \
+              --limit=2)
+
+            PREVIOUS=$(echo "$REVISIONS" | tail -1)
+            if [[ -n "$PREVIOUS" ]]; then
+              echo "Rolling back to: $PREVIOUS"
+              gcloud run services update-traffic frontend \
+                --region=${{ env.REGION }} \
+                --project=${{ env.PROJECT_ID }} \
+                --to-revisions=${PREVIOUS}=100
+            else
+              echo "No previous revision found"
+              exit 1
+            fi
+          fi
+
+      - name: Verify rollback
+        run: |
+          echo "## Rollback Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ inputs.service }}" == "backend" || "${{ inputs.service }}" == "both" ]]; then
+            BACKEND_URL=$(gcloud run services describe backend --region=${{ env.REGION }} --project=${{ env.PROJECT_ID }} --format="value(status.url)" 2>/dev/null)
+            echo "**Backend:** $BACKEND_URL" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ "${{ inputs.service }}" == "frontend" || "${{ inputs.service }}" == "both" ]]; then
+            FRONTEND_URL=$(gcloud run services describe frontend --region=${{ env.REGION }} --project=${{ env.PROJECT_ID }} --format="value(status.url)" 2>/dev/null)
+            echo "**Frontend:** $FRONTEND_URL" >> $GITHUB_STEP_SUMMARY
+          fi
