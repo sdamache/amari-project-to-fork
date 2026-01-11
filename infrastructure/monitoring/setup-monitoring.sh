@@ -202,7 +202,7 @@ case "${1:-status}" in
     "logs")
         SERVICE=${2:-backend}
         echo "📋 Recent logs for $SERVICE"
-        gcloud run logs read $SERVICE --region=$REGION --project=$PROJECT_ID --limit=50
+        gcloud run services logs read $SERVICE --region=$REGION --project=$PROJECT_ID --limit=50
         ;;
     "errors")
         echo "❌ Recent errors"
