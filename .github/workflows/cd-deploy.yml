@@ -104,35 +104,14 @@ jobs:
             --quiet
           echo "✅ Frontend can now invoke backend via IAM"
 
-      - name: Verify backend health (with auth token)
-        id: health-check
+      # Note: Backend has --ingress=internal, so we cannot health check it directly from GitHub Actions.
+      # Backend health is verified via frontend proxy after frontend deploys (see end-to-end check below).
+      # Cloud Run also performs its own container startup probe.
+      - name: Backend deployed (health check via frontend)
         run: |
-          set -e
-          BACKEND_URL="${{ steps.deploy-backend.outputs.url }}"
-          echo "🏥 Verifying backend health at $BACKEND_URL/health"
-
-          # Get ID token for authenticated request
-          TOKEN=$(gcloud auth print-identity-token --audiences=$BACKEND_URL 2>/dev/null || echo "")
-
-          for i in {1..5}; do
-            if [ -n "$TOKEN" ]; then
-              RESPONSE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$BACKEND_URL/health" 2>/dev/null || echo "")
-            else
-              RESPONSE=$(curl -sf "$BACKEND_URL/health" 2>/dev/null || echo "")
-            fi
-
-            if [ -n "$RESPONSE" ]; then
-              echo "✅ Backend is healthy!"
-              echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE"
-              echo "health_status=success" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            echo "⏳ Attempt $i/5 - waiting for backend..."
-            sleep 10
-          done
-          echo "❌ Backend health check failed!"
-          echo "health_status=failed" >> $GITHUB_OUTPUT
-          exit 1
+          echo "✅ Backend deployed successfully!"
+          echo "📝 Note: Backend has internal ingress - health check will run via frontend proxy"
+          echo "🔗 Backend URL (internal): ${{ steps.deploy-backend.outputs.url }}"
 
       # Automatic rollback on health check failure
       - name: Rollback backend on failure
@@ -286,6 +265,26 @@ jobs:
         run: |
           echo "✅ Frontend deployed successfully!"
           echo "URL: ${{ steps.deploy-frontend.outputs.url }}"
+
+      # End-to-end health check: verify backend is reachable via frontend proxy
+      - name: Verify backend via frontend proxy (end-to-end)
+        run: |
+          set -e
+          FRONTEND_URL="${{ steps.deploy-frontend.outputs.url }}"
+          echo "🏥 Verifying backend health via frontend proxy at $FRONTEND_URL/api/health"
+
+          for i in {1..5}; do
+            RESPONSE=$(curl -sf "$FRONTEND_URL/api/health" 2>/dev/null || echo "")
+            if [ -n "$RESPONSE" ]; then
+              echo "✅ End-to-end check passed! Backend is healthy via frontend proxy"
+              echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE"
+              exit 0
+            fi
+            echo "⏳ Attempt $i/5 - waiting for backend via proxy..."
+            sleep 10
+          done
+          echo "❌ End-to-end health check failed! Backend unreachable via frontend proxy"
+          exit 1
 
       - name: Update backend CORS with frontend URL
         run: |
