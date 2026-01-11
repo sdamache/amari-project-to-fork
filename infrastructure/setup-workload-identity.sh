@@ -60,9 +60,11 @@ gcloud iam service-accounts create $SERVICE_ACCOUNT_NAME \
 echo "🔑 Granting IAM roles to GitHub Actions service account..."
 for role in \
     "roles/run.admin" \
+    "roles/run.invoker" \
     "roles/iam.serviceAccountUser" \
     "roles/artifactregistry.writer" \
-    "roles/storage.admin"
+    "roles/storage.admin" \
+    "roles/iam.securityAdmin"
 do
     echo "  Adding: $role"
     gcloud projects add-iam-policy-binding $PROJECT_ID \
@@ -72,6 +74,14 @@ do
         --quiet > /dev/null 2>&1
 done
 echo "  ✓ IAM roles assigned"
+echo ""
+echo "📝 Role explanations:"
+echo "  • roles/run.admin - Deploy and manage Cloud Run services"
+echo "  • roles/run.invoker - Invoke Cloud Run services (for health checks)"
+echo "  • roles/iam.serviceAccountUser - Act as service accounts when deploying"
+echo "  • roles/artifactregistry.writer - Push container images"
+echo "  • roles/storage.admin - Access Cloud Storage (for builds)"
+echo "  • roles/iam.securityAdmin - Add IAM bindings (frontend→backend invoke)"
 
 # Allow GitHub Actions to impersonate the service account
 echo "🎭 Configuring workload identity binding..."
