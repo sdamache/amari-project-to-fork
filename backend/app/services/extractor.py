@@ -1,8 +1,10 @@
+import time
 import instructor
 from anthropic import Anthropic
 from app.core.config import settings
 from app.schemas import ShipmentExtraction
 from app.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from app.metrics import document_processing_total, llm_extraction_duration_seconds
 from typing import List
 
 # Initialize the client with instructor
@@ -47,6 +49,7 @@ def extract_data(pdf_images: List[str], excel_text: str) -> ShipmentExtraction:
         "text": text_content
     })
 
+    start_time = time.time()
     try:
         resp = client.messages.create(
             model="claude-sonnet-4-5",
@@ -60,7 +63,15 @@ def extract_data(pdf_images: List[str], excel_text: str) -> ShipmentExtraction:
             ],
             response_model=ShipmentExtraction,
         )
+        # Record successful extraction metrics
+        duration = time.time() - start_time
+        llm_extraction_duration_seconds.observe(duration)
+        document_processing_total.labels(status="success").inc()
         return resp
     except Exception as e:
+        # Record failed extraction metrics
+        duration = time.time() - start_time
+        llm_extraction_duration_seconds.observe(duration)
+        document_processing_total.labels(status="error").inc()
         # simpler re-raise or logging
         raise RuntimeError(f"LLM Extraction failed: {str(e)}")

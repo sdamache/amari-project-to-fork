@@ -1,9 +1,10 @@
 import os
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 from app.logging_config import setup_logging, RequestLoggingMiddleware, get_logger
+from app.metrics import get_metrics, get_metrics_content_type
 import uvicorn
 
 # Configure structured logging for GCP Cloud Logging
@@ -66,6 +67,19 @@ async def root():
 async def health_check():
     """Health check endpoint for Cloud Run and load balancers."""
     return {"status": "healthy", "service": "backend"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """
+    Expose Prometheus metrics for Cloud Run scraping.
+
+    Returns metrics in Prometheus text format including:
+    - document_processing_total: Counter for documents processed (success/error)
+    - llm_extraction_duration_seconds: Histogram for LLM extraction time
+    - file_upload_bytes: Counter for total bytes uploaded
+    """
+    return Response(content=get_metrics(), media_type=get_metrics_content_type())
 
 
 if __name__ == "__main__":
