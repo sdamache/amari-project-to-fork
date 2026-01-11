@@ -30,11 +30,14 @@ echo "Region: $REGION"
 echo "Build Tag: $BUILD_TAG"
 echo ""
 
-# Check for required environment variables
-if [ -z "$ANTHROPIC_API_KEY" ]; then
-    echo "❌ Error: ANTHROPIC_API_KEY is not set"
+# Verify Secret Manager secret exists
+echo "🔐 Verifying ANTHROPIC_API_KEY secret in Secret Manager..."
+if ! gcloud secrets describe anthropic-api-key --project=$PROJECT_ID > /dev/null 2>&1; then
+    echo "❌ Error: anthropic-api-key secret not found in Secret Manager"
+    echo "   Run ./infrastructure/setup-gcp.sh to create it"
     exit 1
 fi
+echo "  ✓ Secret found"
 
 # Configure Docker authentication
 echo "🔐 Configuring Docker authentication..."
@@ -63,7 +66,7 @@ BACKEND_URL=$(gcloud run deploy backend \
     --min-instances=0 \
     --max-instances=10 \
     --timeout=300s \
-    --set-env-vars="ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
+    --set-secrets="ANTHROPIC_API_KEY=anthropic-api-key:latest" \
     --project=$PROJECT_ID \
     --format="value(status.url)")
 
