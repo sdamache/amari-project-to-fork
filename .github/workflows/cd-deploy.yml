@@ -40,9 +40,16 @@ jobs:
       - name: Build and push backend image
         id: build-backend
         run: |
+          set -e  # Fail fast on any error
           IMAGE_TAG="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/backend:${{ github.sha }}"
+          echo "::group::Building backend image"
+          echo "Building image: $IMAGE_TAG"
           docker build --platform linux/amd64 -t $IMAGE_TAG ./backend
+          echo "::endgroup::"
+          echo "::group::Pushing backend image"
           docker push $IMAGE_TAG
+          echo "::endgroup::"
+          echo "✅ Backend image built and pushed successfully"
           echo "image=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
       - name: Deploy backend to Cloud Run
@@ -64,8 +71,28 @@ jobs:
             --allow-unauthenticated
             --service-account=logistics-extractor-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com
 
+      - name: Verify backend health
+        run: |
+          set -e
+          BACKEND_URL="${{ steps.deploy-backend.outputs.url }}"
+          echo "🏥 Verifying backend health at $BACKEND_URL/health"
+          for i in {1..5}; do
+            if curl -sf "$BACKEND_URL/health" > /dev/null 2>&1; then
+              echo "✅ Backend is healthy!"
+              curl -s "$BACKEND_URL/health" | jq .
+              exit 0
+            fi
+            echo "⏳ Attempt $i/5 - waiting for backend..."
+            sleep 10
+          done
+          echo "❌ Backend health check failed!"
+          exit 1
+
       - name: Show backend URL
-        run: echo "Backend deployed to ${{ steps.deploy-backend.outputs.url }}"
+        run: |
+          echo "✅ Backend deployed successfully!"
+          echo "URL: ${{ steps.deploy-backend.outputs.url }}"
+          echo "API Docs: ${{ steps.deploy-backend.outputs.url }}/docs"
 
     outputs:
       backend_url: ${{ steps.deploy-backend.outputs.url }}
@@ -98,13 +125,21 @@ jobs:
       - name: Build and push frontend image
         id: build-frontend
         run: |
+          set -e  # Fail fast on any error
           IMAGE_TAG="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/frontend:${{ github.sha }}"
+          echo "::group::Building frontend image"
+          echo "Building image: $IMAGE_TAG"
+          echo "Backend URL: ${{ needs.build-and-deploy-backend.outputs.backend_url }}"
           docker build \
             --platform linux/amd64 \
             --build-arg VITE_API_URL=${{ needs.build-and-deploy-backend.outputs.backend_url }} \
             -t $IMAGE_TAG \
             ./frontend
+          echo "::endgroup::"
+          echo "::group::Pushing frontend image"
           docker push $IMAGE_TAG
+          echo "::endgroup::"
+          echo "✅ Frontend image built and pushed successfully"
           echo "image=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
       - name: Deploy frontend to Cloud Run
@@ -124,8 +159,26 @@ jobs:
             --allow-unauthenticated
             --service-account=logistics-extractor-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com
 
+      - name: Verify frontend health
+        run: |
+          set -e
+          FRONTEND_URL="${{ steps.deploy-frontend.outputs.url }}"
+          echo "🏥 Verifying frontend health at $FRONTEND_URL/health"
+          for i in {1..5}; do
+            if curl -sf "$FRONTEND_URL/health" > /dev/null 2>&1; then
+              echo "✅ Frontend is healthy!"
+              exit 0
+            fi
+            echo "⏳ Attempt $i/5 - waiting for frontend..."
+            sleep 10
+          done
+          echo "❌ Frontend health check failed!"
+          exit 1
+
       - name: Show frontend URL
-        run: echo "Frontend deployed to ${{ steps.deploy-frontend.outputs.url }}"
+        run: |
+          echo "✅ Frontend deployed successfully!"
+          echo "URL: ${{ steps.deploy-frontend.outputs.url }}"
 
       - name: Update backend CORS with frontend URL
         run: |
