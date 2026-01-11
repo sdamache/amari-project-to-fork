@@ -173,9 +173,332 @@ gcloud alpha monitoring policies create \
     --policy-from-file=/tmp/latency-policy.json \
     --project=$PROJECT_ID 2>/dev/null || echo "  Latency policy may already exist"
 
-rm -f /tmp/error-rate-policy.json /tmp/latency-policy.json
+# Service unavailable alert policy (CRITICAL)
+# Triggers when uptime check fails for 2+ consecutive checks (2 minutes)
+cat > /tmp/availability-policy.json << EOF
+{
+  "displayName": "Service Unavailable - Logistics Extractor",
+  "documentation": {
+    "content": "CRITICAL: Service is down. Check Cloud Run status immediately.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "Uptime check failed for 2+ minutes",
+      "conditionThreshold": {
+        "filter": "resource.type=\"uptime_url\" AND metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\"",
+        "comparison": "COMPARISON_LT",
+        "thresholdValue": 1,
+        "duration": "120s",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_NEXT_OLDER",
+            "crossSeriesReducer": "REDUCE_COUNT_FALSE"
+          }
+        ]
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true
+}
+EOF
+
+gcloud alpha monitoring policies create \
+    --policy-from-file=/tmp/availability-policy.json \
+    --project=$PROJECT_ID 2>/dev/null || echo "  Availability policy may already exist"
+
+rm -f /tmp/error-rate-policy.json /tmp/latency-policy.json /tmp/availability-policy.json
 
 echo "✅ Alert policies created"
+
+# =============================================================================
+# CREATE MONITORING DASHBOARD
+# =============================================================================
+# Dashboard provides visual overview of service health and performance.
+# Uses Cloud Run built-in metrics - no custom instrumentation required.
+# Grid layout with 2 columns for side-by-side comparison of metrics.
+# =============================================================================
+echo "📊 Creating monitoring dashboard..."
+
+# Dashboard JSON configuration
+# Each widget uses Cloud Run metrics to visualize different aspects of service health:
+# - Request count: Overall traffic volume
+# - Error rate: 5xx responses indicating server-side issues
+# - Latency: Response time distribution (P50, P95, P99)
+# - Instance count: Auto-scaling behavior
+# - Memory/CPU: Resource utilization for capacity planning
+cat > /tmp/dashboard.json << 'EOF'
+{
+  "displayName": "Logistics Extractor Dashboard",
+  "gridLayout": {
+    "columns": "2",
+    "widgets": [
+      {
+        "title": "Request Count",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"cloud_run_revision\" AND metric.type=\"run.googleapis.com/request_count\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_RATE",
+                    "crossSeriesReducer": "REDUCE_SUM",
+                    "groupByFields": ["resource.labels.service_name"]
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "${resource.labels.service_name}"
+            }
+          ],
+          "yAxis": {
+            "label": "Requests/sec",
+            "scale": "LINEAR"
+          },
+          "chartOptions": {
+            "mode": "COLOR"
+          }
+        }
+      },
+      {
+        "title": "Error Rate (5xx Responses)",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"cloud_run_revision\" AND metric.type=\"run.googleapis.com/request_count\" AND metric.labels.response_code_class=\"5xx\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_RATE",
+                    "crossSeriesReducer": "REDUCE_SUM",
+                    "groupByFields": ["resource.labels.service_name"]
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "${resource.labels.service_name}"
+            }
+          ],
+          "yAxis": {
+            "label": "Errors/sec",
+            "scale": "LINEAR"
+          },
+          "chartOptions": {
+            "mode": "COLOR"
+          },
+          "thresholds": [
+            {
+              "value": 0.1,
+              "color": "YELLOW",
+              "direction": "ABOVE"
+            }
+          ]
+        }
+      },
+      {
+        "title": "Latency Percentiles (P50, P95, P99)",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"backend\" AND metric.type=\"run.googleapis.com/request_latencies\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_PERCENTILE_50"
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "P50"
+            },
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"backend\" AND metric.type=\"run.googleapis.com/request_latencies\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_PERCENTILE_95"
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "P95"
+            },
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"backend\" AND metric.type=\"run.googleapis.com/request_latencies\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_PERCENTILE_99"
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "P99"
+            }
+          ],
+          "yAxis": {
+            "label": "Latency (ms)",
+            "scale": "LINEAR"
+          },
+          "chartOptions": {
+            "mode": "COLOR"
+          },
+          "thresholds": [
+            {
+              "value": 10000,
+              "color": "RED",
+              "direction": "ABOVE"
+            }
+          ]
+        }
+      },
+      {
+        "title": "Instance Count",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"cloud_run_revision\" AND metric.type=\"run.googleapis.com/container/instance_count\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_MAX",
+                    "crossSeriesReducer": "REDUCE_SUM",
+                    "groupByFields": ["resource.labels.service_name"]
+                  }
+                }
+              },
+              "plotType": "STACKED_AREA",
+              "legendTemplate": "${resource.labels.service_name}"
+            }
+          ],
+          "yAxis": {
+            "label": "Instances",
+            "scale": "LINEAR"
+          },
+          "chartOptions": {
+            "mode": "COLOR"
+          }
+        }
+      },
+      {
+        "title": "Memory Utilization",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"cloud_run_revision\" AND metric.type=\"run.googleapis.com/container/memory/utilizations\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                    "crossSeriesReducer": "REDUCE_MEAN",
+                    "groupByFields": ["resource.labels.service_name"]
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "${resource.labels.service_name}"
+            }
+          ],
+          "yAxis": {
+            "label": "Utilization (%)",
+            "scale": "LINEAR"
+          },
+          "chartOptions": {
+            "mode": "COLOR"
+          },
+          "thresholds": [
+            {
+              "value": 0.8,
+              "color": "YELLOW",
+              "direction": "ABOVE"
+            },
+            {
+              "value": 0.95,
+              "color": "RED",
+              "direction": "ABOVE"
+            }
+          ]
+        }
+      },
+      {
+        "title": "CPU Utilization",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"cloud_run_revision\" AND metric.type=\"run.googleapis.com/container/cpu/utilizations\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                    "crossSeriesReducer": "REDUCE_MEAN",
+                    "groupByFields": ["resource.labels.service_name"]
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "${resource.labels.service_name}"
+            }
+          ],
+          "yAxis": {
+            "label": "Utilization (%)",
+            "scale": "LINEAR"
+          },
+          "chartOptions": {
+            "mode": "COLOR"
+          },
+          "thresholds": [
+            {
+              "value": 0.8,
+              "color": "YELLOW",
+              "direction": "ABOVE"
+            },
+            {
+              "value": 0.95,
+              "color": "RED",
+              "direction": "ABOVE"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+EOF
+
+# Create the dashboard using gcloud
+# Note: Dashboard creation is idempotent - running multiple times may create duplicates
+# Check existing dashboards first to avoid duplicates
+EXISTING_DASHBOARD=$(gcloud monitoring dashboards list \
+    --project=$PROJECT_ID \
+    --filter="displayName='Logistics Extractor Dashboard'" \
+    --format="value(name)" 2>/dev/null | head -1 || echo "")
+
+if [ -n "$EXISTING_DASHBOARD" ]; then
+    echo "  Dashboard already exists, updating..."
+    gcloud monitoring dashboards update "$EXISTING_DASHBOARD" \
+        --config-from-file=/tmp/dashboard.json \
+        --project=$PROJECT_ID 2>/dev/null || echo "  Could not update dashboard"
+else
+    echo "  Creating new dashboard..."
+    gcloud monitoring dashboards create \
+        --config-from-file=/tmp/dashboard.json \
+        --project=$PROJECT_ID 2>/dev/null || echo "  Dashboard may already exist"
+fi
+
+rm -f /tmp/dashboard.json
+
+echo "✅ Monitoring dashboard created"
 
 # Create monitoring script for local use
 cat > /tmp/monitor-services.sh << 'SCRIPT'
@@ -231,6 +554,10 @@ echo "📋 What was created:"
 echo "  • Uptime checks for backend and frontend"
 echo "  • Alert policy: High Error Rate (>5%)"
 echo "  • Alert policy: High Latency (P95 > 10s)"
+echo "  • Alert policy: Service Unavailable (CRITICAL - 2+ minute downtime)"
+echo "  • Dashboard: Logistics Extractor Dashboard (6 widgets)"
+echo "    - Request count, Error rate, Latency percentiles"
+echo "    - Instance count, Memory utilization, CPU utilization"
 echo "  • Local monitoring script: ./infrastructure/monitoring/monitor-services.sh"
 echo ""
 echo "🔧 Quick commands:"
@@ -239,5 +566,6 @@ echo "  ./infrastructure/monitoring/monitor-services.sh logs    # View backend l
 echo "  ./infrastructure/monitoring/monitor-services.sh errors  # View errors"
 echo ""
 echo "📊 View in Console:"
-echo "  https://console.cloud.google.com/monitoring?project=$PROJECT_ID"
-echo "  https://console.cloud.google.com/run?project=$PROJECT_ID"
+echo "  Dashboard: https://console.cloud.google.com/monitoring/dashboards?project=$PROJECT_ID"
+echo "  Monitoring: https://console.cloud.google.com/monitoring?project=$PROJECT_ID"
+echo "  Cloud Run: https://console.cloud.google.com/run?project=$PROJECT_ID"

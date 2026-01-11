@@ -8,6 +8,7 @@ from app.services.extractor import extract_data
 from app.utils.excel_parser import parse_excel
 from app.utils.image_converter import convert_pdf_to_images
 from app.schemas import ShipmentExtraction, ShipmentResponse
+from app.metrics import file_upload_bytes
 
 router = APIRouter()
 
@@ -49,6 +50,9 @@ async def extract_shipment_data(
     for file in files:
         filename = file.filename.lower()
         content = await file.read()
+
+        # Track file upload size
+        file_upload_bytes.inc(len(content))
         
         if filename.endswith('.pdf'):
             try:
