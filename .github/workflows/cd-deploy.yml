@@ -37,21 +37,34 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
 
-      # Save current revision for potential rollback
-      - name: Get current backend revision
+      # Save current HEALTHY revision for potential rollback
+      # Only rollback to revisions that are actually healthy (STATUS=True)
+      - name: Get current healthy backend revision
         id: current-revision
         run: |
-          CURRENT=$(gcloud run revisions list --service=backend \
+          echo "🔍 Finding most recent healthy backend revision for rollback..."
+          # Get the most recent revision that is currently serving traffic (guaranteed healthy)
+          CURRENT=$(gcloud run services describe backend \
             --region=${{ env.REGION }} \
             --project=${{ env.PROJECT_ID }} \
-            --format="value(name)" \
-            --sort-by="~creationTimestamp" \
-            --limit=1 2>/dev/null || echo "")
+            --format="value(status.traffic[0].revisionName)" 2>/dev/null || echo "")
+
+          # If no traffic info, find the most recent healthy revision
+          if [ -z "$CURRENT" ]; then
+            CURRENT=$(gcloud run revisions list --service=backend \
+              --region=${{ env.REGION }} \
+              --project=${{ env.PROJECT_ID }} \
+              --filter="status.conditions.status=True" \
+              --format="value(name)" \
+              --sort-by="~creationTimestamp" \
+              --limit=1 2>/dev/null || echo "")
+          fi
+
           echo "revision=$CURRENT" >> $GITHUB_OUTPUT
           if [ -n "$CURRENT" ]; then
-            echo "📌 Current backend revision: $CURRENT (saved for rollback)"
+            echo "📌 Healthy backend revision for rollback: $CURRENT"
           else
-            echo "📌 No existing backend revision (first deployment)"
+            echo "📌 No healthy backend revision found (first deployment)"
           fi
 
       - name: Build and push backend image
@@ -170,21 +183,34 @@ jobs:
             --quiet 2>/dev/null || echo "Already enabled or no permission"
           echo "✅ Private Google Access enabled"
 
-      # Save current revision for potential rollback
-      - name: Get current frontend revision
+      # Save current HEALTHY revision for potential rollback
+      # Only rollback to revisions that are actually healthy (STATUS=True)
+      - name: Get current healthy frontend revision
         id: current-revision
         run: |
-          CURRENT=$(gcloud run revisions list --service=frontend \
+          echo "🔍 Finding most recent healthy frontend revision for rollback..."
+          # Get the most recent revision that is currently serving traffic (guaranteed healthy)
+          CURRENT=$(gcloud run services describe frontend \
             --region=${{ env.REGION }} \
             --project=${{ env.PROJECT_ID }} \
-            --format="value(name)" \
-            --sort-by="~creationTimestamp" \
-            --limit=1 2>/dev/null || echo "")
+            --format="value(status.traffic[0].revisionName)" 2>/dev/null || echo "")
+
+          # If no traffic info, find the most recent healthy revision
+          if [ -z "$CURRENT" ]; then
+            CURRENT=$(gcloud run revisions list --service=frontend \
+              --region=${{ env.REGION }} \
+              --project=${{ env.PROJECT_ID }} \
+              --filter="status.conditions.status=True" \
+              --format="value(name)" \
+              --sort-by="~creationTimestamp" \
+              --limit=1 2>/dev/null || echo "")
+          fi
+
           echo "revision=$CURRENT" >> $GITHUB_OUTPUT
           if [ -n "$CURRENT" ]; then
-            echo "📌 Current frontend revision: $CURRENT (saved for rollback)"
+            echo "📌 Healthy frontend revision for rollback: $CURRENT"
           else
-            echo "📌 No existing frontend revision (first deployment)"
+            echo "📌 No healthy frontend revision found (first deployment)"
           fi
 
       - name: Build and push frontend image
