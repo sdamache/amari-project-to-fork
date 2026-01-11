@@ -1,16 +1,23 @@
 import time
 import instructor
-from anthropic import Anthropic
+from anthropic import Anthropic, RateLimitError, APITimeoutError, APIError
 from app.core.config import settings
 from app.schemas import ShipmentExtraction
 from app.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
-from app.metrics import document_processing_total, llm_extraction_duration_seconds
+from app.metrics import (
+    document_processing_total,
+    llm_extraction_duration_seconds,
+    llm_errors_total,
+)
+from app.logging_config import get_logger
 from typing import List
+
+logger = get_logger(__name__)
 
 # Initialize the client with instructor
 # Note: We need to ensure ANTHROPIC_API_KEY is set in the environment or .env file
 if not settings.ANTHROPIC_API_KEY:
-    print("WARNING: ANTHROPIC_API_KEY is not set.")
+    logger.warning("ANTHROPIC_API_KEY is not set.")
 
 client = instructor.from_anthropic(Anthropic(api_key=settings.ANTHROPIC_API_KEY))
 
@@ -67,11 +74,57 @@ def extract_data(pdf_images: List[str], excel_text: str) -> ShipmentExtraction:
         duration = time.time() - start_time
         llm_extraction_duration_seconds.observe(duration)
         document_processing_total.labels(status="success").inc()
+        logger.info(
+            f"LLM extraction completed successfully",
+            extra={"extra_fields": {"duration_seconds": duration}},
+        )
         return resp
-    except Exception as e:
-        # Record failed extraction metrics
+
+    except RateLimitError as e:
+        # Rate limit hit - track and re-raise
         duration = time.time() - start_time
         llm_extraction_duration_seconds.observe(duration)
         document_processing_total.labels(status="error").inc()
-        # simpler re-raise or logging
+        llm_errors_total.labels(provider="anthropic", error_type="rate_limit").inc()
+        logger.error(
+            f"LLM rate limit exceeded",
+            extra={"extra_fields": {"duration_seconds": duration, "error": str(e)}},
+        )
+        raise RuntimeError(f"LLM rate limit exceeded: {str(e)}")
+
+    except APITimeoutError as e:
+        # Timeout - track and re-raise
+        duration = time.time() - start_time
+        llm_extraction_duration_seconds.observe(duration)
+        document_processing_total.labels(status="error").inc()
+        llm_errors_total.labels(provider="anthropic", error_type="timeout").inc()
+        logger.error(
+            f"LLM API timeout",
+            extra={"extra_fields": {"duration_seconds": duration, "error": str(e)}},
+        )
+        raise RuntimeError(f"LLM API timeout: {str(e)}")
+
+    except APIError as e:
+        # General API error - track and re-raise
+        duration = time.time() - start_time
+        llm_extraction_duration_seconds.observe(duration)
+        document_processing_total.labels(status="error").inc()
+        llm_errors_total.labels(provider="anthropic", error_type="api_error").inc()
+        logger.error(
+            f"LLM API error",
+            extra={"extra_fields": {"duration_seconds": duration, "error": str(e)}},
+        )
+        raise RuntimeError(f"LLM API error: {str(e)}")
+
+    except Exception as e:
+        # Record failed extraction metrics for any other error
+        duration = time.time() - start_time
+        llm_extraction_duration_seconds.observe(duration)
+        document_processing_total.labels(status="error").inc()
+        llm_errors_total.labels(provider="anthropic", error_type="unknown").inc()
+        logger.error(
+            f"LLM extraction failed",
+            extra={"extra_fields": {"duration_seconds": duration, "error": str(e)}},
+            exc_info=True,
+        )
         raise RuntimeError(f"LLM Extraction failed: {str(e)}")
