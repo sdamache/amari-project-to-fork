@@ -173,7 +173,43 @@ gcloud alpha monitoring policies create \
     --policy-from-file=/tmp/latency-policy.json \
     --project=$PROJECT_ID 2>/dev/null || echo "  Latency policy may already exist"
 
-rm -f /tmp/error-rate-policy.json /tmp/latency-policy.json
+# Service unavailable alert policy (CRITICAL)
+# Triggers when uptime check fails for 2+ consecutive checks (2 minutes)
+cat > /tmp/availability-policy.json << EOF
+{
+  "displayName": "Service Unavailable - Logistics Extractor",
+  "documentation": {
+    "content": "CRITICAL: Service is down. Check Cloud Run status immediately.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "Uptime check failed for 2+ minutes",
+      "conditionThreshold": {
+        "filter": "resource.type=\"uptime_url\" AND metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\"",
+        "comparison": "COMPARISON_LT",
+        "thresholdValue": 1,
+        "duration": "120s",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_NEXT_OLDER",
+            "crossSeriesReducer": "REDUCE_COUNT_FALSE"
+          }
+        ]
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true
+}
+EOF
+
+gcloud alpha monitoring policies create \
+    --policy-from-file=/tmp/availability-policy.json \
+    --project=$PROJECT_ID 2>/dev/null || echo "  Availability policy may already exist"
+
+rm -f /tmp/error-rate-policy.json /tmp/latency-policy.json /tmp/availability-policy.json
 
 echo "✅ Alert policies created"
 
@@ -231,6 +267,7 @@ echo "📋 What was created:"
 echo "  • Uptime checks for backend and frontend"
 echo "  • Alert policy: High Error Rate (>5%)"
 echo "  • Alert policy: High Latency (P95 > 10s)"
+echo "  • Alert policy: Service Unavailable (CRITICAL - 2+ minute downtime)"
 echo "  • Local monitoring script: ./infrastructure/monitoring/monitor-services.sh"
 echo ""
 echo "🔧 Quick commands:"
