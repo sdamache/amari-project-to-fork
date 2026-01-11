@@ -35,6 +35,7 @@ gcloud services enable \
     iam.googleapis.com \
     iamcredentials.googleapis.com \
     cloudresourcemanager.googleapis.com \
+    secretmanager.googleapis.com \
     --project=$PROJECT_ID
 
 echo "✅ APIs enabled"
@@ -91,6 +92,34 @@ do
         --quiet > /dev/null 2>&1
 done
 echo "  ✓ IAM roles assigned"
+
+# Setup Secret Manager for ANTHROPIC_API_KEY
+echo "🔐 Setting up Secret Manager..."
+
+# Check if secret exists
+if gcloud secrets describe anthropic-api-key --project=$PROJECT_ID > /dev/null 2>&1; then
+    echo "  Secret 'anthropic-api-key' already exists"
+else
+    # Check if ANTHROPIC_API_KEY is set in environment
+    if [ -n "$ANTHROPIC_API_KEY" ]; then
+        echo "  Creating secret 'anthropic-api-key'..."
+        echo -n "$ANTHROPIC_API_KEY" | gcloud secrets create anthropic-api-key \
+            --data-file=- \
+            --project=$PROJECT_ID
+        echo "  ✓ Secret created"
+    else
+        echo "  ⚠️  ANTHROPIC_API_KEY not found in environment"
+        echo "     Create the secret manually after setting the key:"
+        echo "     echo -n 'your-api-key' | gcloud secrets create anthropic-api-key --data-file=- --project=$PROJECT_ID"
+    fi
+fi
+
+# Grant service account access to the secret
+echo "  Granting secret access to service account..."
+gcloud secrets add-iam-policy-binding anthropic-api-key \
+    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+    --role="roles/secretmanager.secretAccessor" \
+    --project=$PROJECT_ID --quiet > /dev/null 2>&1 || echo "  ⚠️  Could not grant access (secret may not exist yet)"
 
 echo ""
 echo "✅ GCP Setup Complete!"
