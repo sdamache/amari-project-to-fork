@@ -34,7 +34,7 @@ function App() {
     })
 
     try {
-      const response = await axios.post<ShipmentData>('http://localhost:8000/process-documents', formData, {
+      const response = await axios.post<ShipmentData>('/process-documents', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
