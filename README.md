@@ -42,6 +42,9 @@ A production-ready full-stack application designed to automate the extraction of
 ### Infrastructure
 *   **Containerization**: Docker & Docker Compose (Multi-stage builds).
 *   **Server**: Nginx (Frontend) + Uvicorn (Backend).
+*   **Cloud**: Google Cloud Run (Serverless containers).
+*   **CI/CD**: GitHub Actions with Workload Identity Federation.
+*   **Monitoring**: Cloud Monitoring, Cloud Logging, Uptime Checks.
 
 ---
 
@@ -89,7 +92,7 @@ This is the simplest way to run the full stack (Frontend + Backend).
 
 3.  Access the App:
     *   **UI**: Open [http://localhost](http://localhost) in your browser.
-    *   **API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs).
+    *   **API Docs**: [http://localhost:8080/docs](http://localhost:8080/docs).
 
 ---
 
@@ -128,6 +131,111 @@ If you prefer to run services individually for development.
     npm run dev
     ```
 4.  Open [http://localhost:5173](http://localhost:5173).
+
+---
+
+## Cloud Deployment (GCP Cloud Run)
+
+Deploy to Google Cloud Run with automated CI/CD via GitHub Actions.
+
+### Prerequisites
+
+- GCP Project with billing enabled
+- `gcloud` CLI installed and authenticated
+- GitHub repository with Actions enabled
+
+### Initial Setup
+
+1. **Configure GCP Infrastructure:**
+   ```bash
+   # Set your API key in .env
+   echo "ANTHROPIC_API_KEY=your_key" >> .env
+
+   # Run GCP setup (creates Artifact Registry, Service Account, Secret Manager)
+   ./infrastructure/setup-gcp.sh
+
+   # Setup Workload Identity Federation (keyless auth for GitHub Actions)
+   ./infrastructure/setup-workload-identity.sh
+   ```
+
+2. **Configure GitHub Variables:**
+
+   The setup scripts will output the values needed. Set them in your GitHub repository:
+   ```bash
+   gh variable set GCP_PROJECT_ID --body "your-project-id"
+   gh variable set GCP_REGION --body "us-central1"
+   gh variable set ARTIFACT_REGISTRY_REPO --body "logistics-extractor"
+   gh variable set GCP_SERVICE_ACCOUNT --body "github-actions-sa@your-project.iam.gserviceaccount.com"
+   gh variable set GCP_WORKLOAD_IDENTITY_PROVIDER --body "projects/PROJECT_NUM/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider"
+   ```
+
+### Automated Deployment (CI/CD)
+
+Push to `main` branch triggers automatic deployment:
+
+```bash
+git push origin main
+```
+
+The CD workflow will:
+1. Build Docker images (linux/amd64)
+2. Push to Artifact Registry
+3. Deploy backend to Cloud Run
+4. Deploy frontend to Cloud Run
+5. Update backend CORS with frontend URL
+
+### Manual Deployment
+
+For local deployment without GitHub Actions:
+
+```bash
+./infrastructure/deploy-to-cloud-run.sh
+```
+
+### Rollback
+
+To rollback to a previous revision:
+
+1. Go to GitHub Actions → "CD - Rollback Cloud Run Service"
+2. Click "Run workflow"
+3. Select service (backend/frontend/both)
+4. Optionally specify a revision name
+
+Or via CLI:
+```bash
+gcloud run services update-traffic backend --to-revisions=REVISION_NAME=100 --region=us-central1
+```
+
+### Monitoring & Logging
+
+Setup monitoring and alerting:
+```bash
+./infrastructure/monitoring/setup-monitoring.sh
+```
+
+Quick monitoring commands:
+```bash
+# Check service health
+./infrastructure/monitoring/monitor-services.sh status
+
+# View backend logs
+gcloud run services logs read backend --region=us-central1
+
+# View errors
+./infrastructure/monitoring/monitor-services.sh errors
+```
+
+View in GCP Console:
+- [Cloud Run Dashboard](https://console.cloud.google.com/run)
+- [Cloud Monitoring](https://console.cloud.google.com/monitoring)
+- [Cloud Logging](https://console.cloud.google.com/logs)
+
+### Service URLs
+
+After deployment:
+- **Frontend**: `https://frontend-PROJECT_NUM.us-central1.run.app`
+- **Backend**: `https://backend-PROJECT_NUM.us-central1.run.app`
+- **API Docs**: `https://backend-PROJECT_NUM.us-central1.run.app/docs`
 
 ---
 
