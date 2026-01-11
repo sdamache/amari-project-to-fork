@@ -52,8 +52,6 @@ jobs:
           service: backend
           region: ${{ env.REGION }}
           image: ${{ steps.build-backend.outputs.image }}
-          env_vars: |
-            ALLOWED_ORIGINS=${{ vars.FRONTEND_URL || '*' }}
           secrets: |
             ANTHROPIC_API_KEY=anthropic-api-key:latest
           flags: |
@@ -128,6 +126,15 @@ jobs:
 
       - name: Show frontend URL
         run: echo "Frontend deployed to ${{ steps.deploy-frontend.outputs.url }}"
+
+      - name: Update backend CORS with frontend URL
+        run: |
+          echo "Updating backend ALLOWED_ORIGINS to ${{ steps.deploy-frontend.outputs.url }}"
+          gcloud run services update backend \
+            --region=${{ env.REGION }} \
+            --update-env-vars="ALLOWED_ORIGINS=${{ steps.deploy-frontend.outputs.url }}" \
+            --project=${{ env.PROJECT_ID }} \
+            --quiet
 
     outputs:
       frontend_url: ${{ steps.deploy-frontend.outputs.url }}
