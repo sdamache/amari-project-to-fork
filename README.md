@@ -263,24 +263,191 @@ uv run python evaluation.py
 
 ---
 
-##  Assumptions & Decisions
+## Production Engineering
+
+### Cloud Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          PUBLIC INTERNET                             │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │
+                    ┌────────────▼────────────┐
+                    │      Frontend           │
+                    │    (Public Ingress)     │
+                    │      Cloud Run          │
+                    │   VPC Egress Enabled    │
+                    └────────────┬────────────┘
+                                 │
+              ┌──────────────────┴──────────────────┐
+              │           VPC Network               │
+              │    (Private Google Access)          │
+              │                                     │
+              │  ┌─────────────────────────────┐    │
+              │  │        Backend              │    │
+              │  │   (Internal Ingress Only)   │    │
+              │  │        Cloud Run            │    │
+              │  └─────────────────────────────┘    │
+              └─────────────────────────────────────┘
+                                 │
+         ┌───────────────────────┼───────────────────────┐
+         │                       │                       │
+  ┌──────▼──────────┐    ┌───────▼─────────┐    ┌────────▼────────┐
+  │ Secret Manager  │    │    Artifact     │    │ Cloud Monitoring│
+  │ (API Keys)      │    │    Registry     │    │ Logging, Alerts │
+  └─────────────────┘    └─────────────────┘    └─────────────────┘
+```
+
+**Traffic Flow:** User → Frontend (public) → VPC Egress → Backend (internal only)
+
+**Security Model:**
+- Backend has `--ingress=internal` - not accessible from public internet
+- Frontend uses VPC Direct Egress to reach backend securely
+- Separate service accounts with minimal IAM permissions
+- Secrets stored in Google Secret Manager
+
+### Alerting Strategy
+
+Three alert policies configured with actionable thresholds:
+
+| Alert | Condition | Threshold | Duration |
+|-------|-----------|-----------|----------|
+| **Service Unavailable** (CRITICAL) | Uptime check fails | 2+ consecutive failures | 2 min |
+| **High Error Rate** | 5xx error rate | > 5% of requests | 5 min |
+| **High Latency** | P95 response time | > 10 seconds | 5 min |
+
+**Uptime Checks:**
+- Both services checked every 60 seconds
+- 10-second timeout per check
+- Endpoints: `/health` on frontend and backend
+
+**Notification:**
+- Email alerts (configurable via `NOTIFICATION_EMAIL`)
+- Integrates with Cloud Monitoring notification channels
+
+**Dashboard Widgets (6):**
+- Request count by service
+- Error rate (5xx) with 0.1/sec threshold
+- Latency percentiles (P50, P95, P99) with 10s threshold
+- Instance count (auto-scaling visualization)
+- Memory utilization (80% yellow, 95% red)
+- CPU utilization (80% yellow, 95% red)
+
+### Prometheus Metrics
+
+Custom application metrics exposed at `/metrics`:
+
+| Metric | Type | Labels | Purpose |
+|--------|------|--------|---------|
+| `document_processing_total` | Counter | `status` | Documents processed (success/error) |
+| `llm_extraction_duration_seconds` | Histogram | - | LLM extraction latency |
+| `llm_errors_total` | Counter | `provider`, `error_type` | LLM API errors (rate_limit, timeout, api_error) |
+| `app_errors_total` | Counter | `endpoint`, `error_type` | Application exceptions |
+| `http_requests_total` | Counter | `handler`, `method`, `status` | HTTP request count (auto-instrumented) |
+| `http_request_duration_seconds` | Histogram | `handler` | HTTP latency (auto-instrumented) |
+
+### Rollback Strategy
+
+**Automatic Rollback (during deployment):**
+- Triggers on health check failure
+- Identifies healthy revision from current traffic (guaranteed working)
+- Falls back to most recent revision with `status=True`
+- Traffic switch is atomic (<5 seconds)
+
+**Manual Rollback (GitHub Actions workflow):**
+```bash
+# Via GitHub Actions UI:
+# 1. Go to Actions → "CD - Rollback Cloud Run Service"
+# 2. Click "Run workflow"
+# 3. Select: service (backend/frontend/both), revision (optional), reason
+```
+
+**Blast Radius:**
+| Service | Impact | Recovery Time |
+|---------|--------|---------------|
+| Backend | HIGH - All API calls affected | <5 seconds |
+| Frontend | MEDIUM - UI down, API works | <5 seconds |
+| Both | CRITICAL - Complete outage | <5 seconds |
+
+**Revision Retention:** All previous revisions kept for instant rollback.
+
+### Quick Operations
+
+```bash
+# Health check all services
+./infrastructure/monitoring/monitor-services.sh status
+
+# View recent logs
+./infrastructure/monitoring/monitor-services.sh logs backend
+
+# View errors across services
+./infrastructure/monitoring/monitor-services.sh errors
+
+# Manual rollback via CLI
+gcloud run services update-traffic backend \
+  --to-revisions=REVISION_NAME=100 \
+  --region=us-central1
+```
+
+---
+
+## Assumptions & Decisions
+
+### Application Design
 
 1.  **Vision vs. Text for PDF**: We chose Vision (converting PDF to Images) because Bill of Lading documents often have complex layouts that confuse standard text extractors (pypdf).
 2.  **Excel to Markdown**: LLMs understand Markdown tables exceptionally well. Converting Excel to Markdown explicitly preserves the row/column structure better than raw JSON dumps for reasoning tasks.
 3.  **Calculated Fields**: We intentionally calculate "Averages" in the backend code (post-LLM) rather than asking the LLM to do math, to eliminate hallucination risks for simple arithmetic.
 
+### Production Deployment
+
+| Decision | Rationale |
+|----------|-----------|
+| **Internal Ingress for Backend** | Reduces attack surface (1 public endpoint vs 2). Backend has API keys and business logic - shouldn't be directly accessible. |
+| **VPC Direct Egress** | Native Cloud Run feature, cheaper than Cloud NAT, no additional infrastructure required. |
+| **10-Second Latency Threshold** | LLM extraction takes 3-7s typically. Alert only fires beyond normal expected behavior. |
+| **1GB Backend, 512MB Frontend** | Backend handles PDF images + Claude SDK. Frontend is lightweight React SPA with nginx. |
+| **Min-Instances=0** | Cost optimization for sporadic usage. Cold start (1-2s) acceptable since extraction waits 5-10s anyway. |
+| **Separate Service Accounts** | Principle of least privilege. Backend reads secrets, frontend invokes backend. |
+| **5% Error Rate Threshold** | Allows intermittent LLM API timeouts. Alerts on sustained problems, not blips. |
+| **2-Minute Availability Window** | Prevents alert fatigue from transient failures during deployments. |
+
 ---
 
 ## Key Tradeoffs & Future Improvements
+
+### Current Tradeoffs
 
 1.  **Cost of Vision API vs. Local OCR**:
     *   **Current Approach**: Sending high-resolution images of documents to Claude is token-intensive and incurs higher costs. However, it provides superior accuracy for complex layouts (like Bills of Lading) compared to standard text extraction.
     *   **Optimization**: If cost becomes a constraint at scale, we could switch to running a local OCR (e.g., Tesseract or PaddleOCR) to extract text and layout coordinates. We would then pass only the text representation to a cheaper text-based LLM, significantly reducing token usage.
 
 2.  **Latency vs. Experience**:
-    *   **Current Approach**: The extraction is synchronous, leading to a 5-10 second wait time.
-    *   **Optimization**: For production loads, offload processing to a background worker queue (Celery/Redis) and use WebSockets to notify the frontend when the extraction is complete.
+    *   **Current**: Synchronous extraction, 5-10 second wait.
+    *   **Optimization**: Background worker queue (Celery/Redis) + WebSocket notifications.
 
-3.  **Excel Parsing Rigidity**:
-    *   **Current Approach**: We rely on converting Excel to Markdown. This works great for standard tables but might struggle with very large or multi-sheet workbooks.
-    *   **Optimization**: Implement chunking strategies for large files or use specific header detection heuristics before sending to the LLM.
+3.  **All-or-Nothing Deployment**:
+    *   **Current**: Full traffic switch on deploy.
+    *   **Optimization**: Canary deployments (10% → 50% → 100%) with automatic rollback.
+
+### Production Improvements Roadmap
+
+**Phase 1: Deployment Robustness**
+- [ ] Canary deployments (10% traffic for 5 min before full rollout)
+- [ ] Enhanced health checks (verify full extraction pipeline, not just HTTP 200)
+- [ ] Synthetic monitoring (periodic test extractions to catch silent failures)
+
+**Phase 2: Cost Optimization**
+- [ ] Intelligent page selection (extract only needed PDF pages)
+- [ ] Extraction caching (Redis for duplicate document detection)
+- [ ] Model fallback (Haiku first, Sonnet if low confidence)
+
+**Phase 3: High Availability**
+- [ ] Multi-region deployment (us-central1, europe-west1, asia-southeast1)
+- [ ] Cross-region failover with Cloud CDN
+- [ ] Disaster recovery plan (30-day backups, incident runbooks)
+
+**Phase 4: Observability**
+- [ ] Distributed tracing (OpenTelemetry)
+- [ ] Custom business metrics (extraction success rate, model accuracy)
+- [ ] Cost tracking dashboard (Vision API + LLM spend visibility)
