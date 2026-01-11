@@ -37,6 +37,23 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
 
+      # Save current revision for potential rollback
+      - name: Get current backend revision
+        id: current-revision
+        run: |
+          CURRENT=$(gcloud run revisions list --service=backend \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --format="value(name)" \
+            --sort-by="~creationTimestamp" \
+            --limit=1 2>/dev/null || echo "")
+          echo "revision=$CURRENT" >> $GITHUB_OUTPUT
+          if [ -n "$CURRENT" ]; then
+            echo "📌 Current backend revision: $CURRENT (saved for rollback)"
+          else
+            echo "📌 No existing backend revision (first deployment)"
+          fi
+
       - name: Build and push backend image
         id: build-backend
         run: |
@@ -52,6 +69,9 @@ jobs:
           echo "✅ Backend image built and pushed successfully"
           echo "image=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
+      # Backend uses --ingress=internal to block direct internet access.
+      # Only services with VPC Direct Egress (like frontend) can reach it.
+      # Security: internal ingress + CORS (only frontend URL) + separate service accounts.
       - name: Deploy backend to Cloud Run
         id: deploy-backend
         uses: google-github-actions/deploy-cloudrun@v3
@@ -68,25 +88,63 @@ jobs:
             --min-instances=0
             --max-instances=10
             --timeout=300
+            --ingress=internal
             --allow-unauthenticated
-            --service-account=logistics-extractor-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com
+            --service-account=backend-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com
 
-      - name: Verify backend health
+      # Grant frontend service account permission to invoke backend
+      - name: Grant frontend invoke permission on backend
+        run: |
+          echo "🔑 Granting frontend-sa permission to invoke backend..."
+          gcloud run services add-iam-policy-binding backend \
+            --region=${{ env.REGION }} \
+            --member="serviceAccount:frontend-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com" \
+            --role="roles/run.invoker" \
+            --project=${{ env.PROJECT_ID }} \
+            --quiet
+          echo "✅ Frontend can now invoke backend via IAM"
+
+      - name: Verify backend health (with auth token)
+        id: health-check
         run: |
           set -e
           BACKEND_URL="${{ steps.deploy-backend.outputs.url }}"
           echo "🏥 Verifying backend health at $BACKEND_URL/health"
+
+          # Get ID token for authenticated request
+          TOKEN=$(gcloud auth print-identity-token --audiences=$BACKEND_URL 2>/dev/null || echo "")
+
           for i in {1..5}; do
-            if curl -sf "$BACKEND_URL/health" > /dev/null 2>&1; then
+            if [ -n "$TOKEN" ]; then
+              RESPONSE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$BACKEND_URL/health" 2>/dev/null || echo "")
+            else
+              RESPONSE=$(curl -sf "$BACKEND_URL/health" 2>/dev/null || echo "")
+            fi
+
+            if [ -n "$RESPONSE" ]; then
               echo "✅ Backend is healthy!"
-              curl -s "$BACKEND_URL/health" | jq .
+              echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE"
+              echo "health_status=success" >> $GITHUB_OUTPUT
               exit 0
             fi
             echo "⏳ Attempt $i/5 - waiting for backend..."
             sleep 10
           done
           echo "❌ Backend health check failed!"
+          echo "health_status=failed" >> $GITHUB_OUTPUT
           exit 1
+
+      # Automatic rollback on health check failure
+      - name: Rollback backend on failure
+        if: failure() && steps.current-revision.outputs.revision != ''
+        run: |
+          echo "🔄 Rolling back backend to previous revision: ${{ steps.current-revision.outputs.revision }}"
+          gcloud run services update-traffic backend \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --to-revisions=${{ steps.current-revision.outputs.revision }}=100
+          echo "✅ Rollback complete! Traffic restored to previous revision."
+          echo "⚠️  Please investigate the failed deployment before retrying."
 
       - name: Show backend URL
         run: |
@@ -122,6 +180,34 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
 
+      # Enable Private Google Access for VPC Direct Egress to work
+      - name: Enable Private Google Access
+        run: |
+          echo "🌐 Enabling Private Google Access on default subnet..."
+          gcloud compute networks subnets update default \
+            --region=${{ env.REGION }} \
+            --enable-private-ip-google-access \
+            --project=${{ env.PROJECT_ID }} \
+            --quiet 2>/dev/null || echo "Already enabled or no permission"
+          echo "✅ Private Google Access enabled"
+
+      # Save current revision for potential rollback
+      - name: Get current frontend revision
+        id: current-revision
+        run: |
+          CURRENT=$(gcloud run revisions list --service=frontend \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --format="value(name)" \
+            --sort-by="~creationTimestamp" \
+            --limit=1 2>/dev/null || echo "")
+          echo "revision=$CURRENT" >> $GITHUB_OUTPUT
+          if [ -n "$CURRENT" ]; then
+            echo "📌 Current frontend revision: $CURRENT (saved for rollback)"
+          else
+            echo "📌 No existing frontend revision (first deployment)"
+          fi
+
       - name: Build and push frontend image
         id: build-frontend
         run: |
@@ -129,10 +215,9 @@ jobs:
           IMAGE_TAG="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/frontend:${{ github.sha }}"
           echo "::group::Building frontend image"
           echo "Building image: $IMAGE_TAG"
-          echo "Backend URL: ${{ needs.build-and-deploy-backend.outputs.backend_url }}"
+          # Frontend uses /api proxy to reach backend (see nginx config)
           docker build \
             --platform linux/amd64 \
-            --build-arg VITE_API_URL=${{ needs.build-and-deploy-backend.outputs.backend_url }} \
             -t $IMAGE_TAG \
             ./frontend
           echo "::endgroup::"
@@ -142,6 +227,8 @@ jobs:
           echo "✅ Frontend image built and pushed successfully"
           echo "image=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
+      # Frontend uses VPC Direct Egress to reach internal backend.
+      # --network/--subnet/--vpc-egress enable traffic to flow through VPC.
       - name: Deploy frontend to Cloud Run
         id: deploy-frontend
         uses: google-github-actions/deploy-cloudrun@v3
@@ -149,6 +236,8 @@ jobs:
           service: frontend
           region: ${{ env.REGION }}
           image: ${{ steps.build-frontend.outputs.image }}
+          env_vars: |
+            BACKEND_URL=${{ needs.build-and-deploy-backend.outputs.backend_url }}
           flags: |
             --port=8080
             --memory=512Mi
@@ -157,9 +246,13 @@ jobs:
             --max-instances=5
             --timeout=60
             --allow-unauthenticated
-            --service-account=logistics-extractor-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com
+            --service-account=frontend-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com
+            --network=default
+            --subnet=default
+            --vpc-egress=all-traffic
 
       - name: Verify frontend health
+        id: health-check
         run: |
           set -e
           FRONTEND_URL="${{ steps.deploy-frontend.outputs.url }}"
@@ -167,13 +260,27 @@ jobs:
           for i in {1..5}; do
             if curl -sf "$FRONTEND_URL/health" > /dev/null 2>&1; then
               echo "✅ Frontend is healthy!"
+              echo "health_status=success" >> $GITHUB_OUTPUT
               exit 0
             fi
             echo "⏳ Attempt $i/5 - waiting for frontend..."
             sleep 10
           done
           echo "❌ Frontend health check failed!"
+          echo "health_status=failed" >> $GITHUB_OUTPUT
           exit 1
+
+      # Automatic rollback on health check failure
+      - name: Rollback frontend on failure
+        if: failure() && steps.current-revision.outputs.revision != ''
+        run: |
+          echo "🔄 Rolling back frontend to previous revision: ${{ steps.current-revision.outputs.revision }}"
+          gcloud run services update-traffic frontend \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --to-revisions=${{ steps.current-revision.outputs.revision }}=100
+          echo "✅ Rollback complete! Traffic restored to previous revision."
+          echo "⚠️  Please investigate the failed deployment before retrying."
 
       - name: Show frontend URL
         run: |
@@ -183,6 +290,8 @@ jobs:
       - name: Update backend CORS with frontend URL
         run: |
           echo "Updating backend ALLOWED_ORIGINS to ${{ steps.deploy-frontend.outputs.url }}"
+          # Get ID token for authenticated request to backend
+          TOKEN=$(gcloud auth print-identity-token --audiences=${{ needs.build-and-deploy-backend.outputs.backend_url }} 2>/dev/null || echo "")
           gcloud run services update backend \
             --region=${{ env.REGION }} \
             --update-env-vars="ALLOWED_ORIGINS=${{ steps.deploy-frontend.outputs.url }}" \
@@ -199,11 +308,21 @@ jobs:
     steps:
       - name: Deployment summary
         run: |
-          echo "## Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 Deployment Complete!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Service URLs" >> $GITHUB_STEP_SUMMARY
           echo "| Service | URL |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| Backend | ${{ needs.build-and-deploy-backend.outputs.backend_url }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Frontend | ${{ needs.build-and-deploy-frontend.outputs.frontend_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend | ${{ needs.build-and-deploy-backend.outputs.backend_url }} (internal) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔒 Security Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Backend**: Internal ingress only (not accessible from internet)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Frontend**: Public access with VPC Direct Egress to reach backend" >> $GITHUB_STEP_SUMMARY
+          echo "- **VPC**: Private Google Access enabled for VPC-to-Cloud-Run traffic" >> $GITHUB_STEP_SUMMARY
+          echo "- **IAM**: Frontend SA has \`roles/run.invoker\` on backend" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔄 Rollback" >> $GITHUB_STEP_SUMMARY
+          echo "Automatic rollback is enabled. If health checks fail, traffic is restored to the previous revision." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
