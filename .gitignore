@@ -34,6 +34,7 @@ MANIFEST
 .env
 *.env
 .env.*
+!.env.example
 
 # Testing
 .coverage

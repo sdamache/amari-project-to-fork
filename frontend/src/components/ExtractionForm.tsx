@@ -53,7 +53,7 @@ export const ExtractionForm: React.FC<ExtractionFormProps> = ({ data }) => {
     const currentData = getValues();
     setSaveStatus('saving');
     try {
-      await axios.post('http://localhost:8000/save-shipment', currentData);
+      await axios.post('/save-shipment', currentData);
       setSaveStatus('success');
       setTimeout(() => setSaveStatus('idle'), 3000); // Reset after 3 seconds
     } catch (error) {
