@@ -44,8 +44,8 @@ gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
 # Build and Deploy Backend
 # =====================================================
 echo ""
-echo "📦 Building Backend Image..."
-docker build -t $BACKEND_IMAGE ./backend
+echo "📦 Building Backend Image (linux/amd64)..."
+docker build --platform linux/amd64 -t $BACKEND_IMAGE ./backend
 
 echo "⬆️  Pushing Backend Image..."
 docker push $BACKEND_IMAGE
@@ -84,8 +84,9 @@ done
 # Build and Deploy Frontend
 # =====================================================
 echo ""
-echo "📦 Building Frontend Image..."
+echo "📦 Building Frontend Image (linux/amd64)..."
 docker build \
+    --platform linux/amd64 \
     --build-arg VITE_API_URL=$BACKEND_URL \
     -t $FRONTEND_IMAGE \
     ./frontend
